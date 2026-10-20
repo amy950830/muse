@@ -31,7 +31,7 @@ class WorkflowContractTest(unittest.TestCase):
 
     def test_actions_are_sha_pinned_and_checkout_does_not_persist_credentials(self):
         text = workflow_text()
-        refs = re.findall(r'^\s*uses:\s*(actions/[^@\s]+)@([^\s]+)', text, re.M)
+        refs = re.findall(r'^\s*-?\s*uses:\s*(actions/[^@\s]+)@([^\s]+)', text, re.M)
         self.assertGreaterEqual(len(refs), 10)
         for action, ref in refs:
             self.assertRegex(ref, r'^[0-9a-f]{40}$', action)
@@ -41,7 +41,7 @@ class WorkflowContractTest(unittest.TestCase):
 
     def test_every_muse_run_is_sandboxed_bounded_and_secret_scanned(self):
         text = workflow_text()
-        muse_count = text.count('muse exec \\')
+        muse_count = text.count('muse exec ')
         self.assertEqual(muse_count, 3)
         self.assertEqual(text.count('--sandbox-network restricted'), muse_count)
         self.assertEqual(text.count('--max-model-steps'), muse_count)
@@ -70,8 +70,8 @@ class WorkflowContractTest(unittest.TestCase):
         plan = job_section(text, 'plan')
         synth = job_section(text, 'synthesize')
         draft = job_section(text, 'draft_skill_candidate')
-        self.assertLess(plan.index('planning stage changed non-temporary repository paths'), plan.index('secret_guard.py'))
-        self.assertLess(synth.index('synthesis changed unauthorized repository paths'), synth.index('secret_guard.py'))
+        self.assertLess(plan.index('Planning changed tracked repository files.'), plan.index('secret_guard.py'))
+        self.assertLess(synth.index('Synthesis changed unauthorized repository paths'), synth.index('secret_guard.py'))
         self.assertIn('pre-skill-learning.patch', draft)
         self.assertIn('post-skill-learning.patch', draft)
         self.assertIn('cmp -s', draft)
@@ -85,7 +85,7 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertLess(learning.index('validate_learning_output.py'), learning.index('git push'))
         self.assertIn('validate_skill_candidate.py', skill)
         self.assertLess(skill.index('validate_skill_candidate.py'), skill.index('git push'))
-        self.assertIn('if [ "$CHANGED" != "$TARGET" ]', skill)
+        self.assertIn('test "$CHANGED" = "$TARGET"', skill)
 
 
 if __name__ == '__main__':

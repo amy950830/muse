@@ -7,12 +7,9 @@ on:
         description: Learning domain
         required: true
         type: choice
-        options:
-          - frontend
-          - backend
-          - security
+        options: [frontend, backend, security]
       dry_run:
-        description: Run all validation but do not create branches or pull requests
+        description: Validate without creating branches or pull requests
         required: true
         type: boolean
         default: true
@@ -35,11 +32,9 @@ on:
       timezone: 'Asia/Shanghai'
 
 permissions: {}
-
 concurrency:
   group: muse-learning-${{ github.event_name == 'workflow_dispatch' && inputs.domain || github.event.schedule }}
   cancel-in-progress: false
-
 env:
   PYTHONUNBUFFERED: '1'
 
@@ -48,24 +43,16 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || vars.MUSE_LEARNING_SCHEDULE_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions:
-      contents: read
+    permissions: {contents: read}
     outputs:
       domain: ${{ steps.resolve.outputs.domain }}
       dry_run: ${{ steps.resolve.outputs.dry_run }}
       candidate_limit: ${{ steps.resolve.outputs.candidate_limit }}
     steps:
-      - name: Checkout exact run commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: '3.12'
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with: {python-version: '3.12'}
       - name: Resolve run context
         id: resolve
         env:
@@ -78,98 +65,49 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p research
-          DOMAIN="$(python automation/learning/resolve_run.py \
-            --event-name "$EVENT_NAME" \
-            --schedule "$EVENT_SCHEDULE" \
-            --manual-domain "$INPUT_DOMAIN")"
+          DOMAIN="$(python automation/learning/resolve_run.py --event-name "$EVENT_NAME" --schedule "$EVENT_SCHEDULE" --manual-domain "$INPUT_DOMAIN")"
           export DOMAIN
           python - <<'PY'
-          import json
-          import os
+          import json, os
           from pathlib import Path
-
-          event = os.environ["EVENT_NAME"]
-          raw_limit = os.environ.get("INPUT_CANDIDATE_LIMIT", "") if event == "workflow_dispatch" else "30"
-          try:
-              candidate_limit = int(raw_limit or "30")
-          except ValueError as exc:
-              raise SystemExit("candidate_limit must be an integer from 10 to 40") from exc
-          if not 10 <= candidate_limit <= 40:
-              raise SystemExit("candidate_limit must be an integer from 10 to 40")
-
-          if event == "workflow_dispatch":
-              dry_run = os.environ.get("INPUT_DRY_RUN", "true").lower() == "true"
-              topic_override = os.environ.get("INPUT_TOPIC_OVERRIDE", "").strip()
-          else:
-              dry_run = False
-              topic_override = ""
-
+          event = os.environ['EVENT_NAME']
+          raw = os.environ.get('INPUT_CANDIDATE_LIMIT', '') if event == 'workflow_dispatch' else '30'
+          try: limit = int(raw or '30')
+          except ValueError: raise SystemExit('candidate_limit must be an integer from 10 to 40')
+          if not 10 <= limit <= 40: raise SystemExit('candidate_limit must be an integer from 10 to 40')
           context = {
-              "domain": os.environ["DOMAIN"],
-              "dry_run": dry_run,
-              "topic_override": topic_override,
-              "candidate_limit": candidate_limit,
+              'domain': os.environ['DOMAIN'],
+              'dry_run': os.environ.get('INPUT_DRY_RUN', 'true').lower() == 'true' if event == 'workflow_dispatch' else False,
+              'topic_override': os.environ.get('INPUT_TOPIC_OVERRIDE', '').strip() if event == 'workflow_dispatch' else '',
+              'candidate_limit': limit,
           }
-          Path("research/run-context.json").write_text(
-              json.dumps(context, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-          )
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+          Path('research/run-context.json').write_text(json.dumps(context, indent=2, sort_keys=True) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f"domain={context['domain']}\n")
               out.write(f"dry_run={'true' if context['dry_run'] else 'false'}\n")
               out.write(f"candidate_limit={context['candidate_limit']}\n")
           PY
-
       - name: Require Muse API key
-        env:
-          META_API_KEY: ${{ secrets.META_API_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "$META_API_KEY" ]; then
-            echo 'META_API_KEY is required for Muse learning runs.' >&2
-            exit 2
-          fi
-
+        env: {META_API_KEY: '${{ secrets.META_API_KEY }}'}
+        run: test -n "$META_API_KEY" || { echo 'META_API_KEY is required.' >&2; exit 2; }
       - name: Install Muse Code
         run: |
           set -euo pipefail
           curl -fsSL https://dev.meta.ai/install.sh | sh
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
           muse --version
-
       - name: Select research topic with Muse
-        env:
-          META_API_KEY: ${{ secrets.META_API_KEY }}
+        env: {META_API_KEY: '${{ secrets.META_API_KEY }}'}
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
-          muse exec \
-            --trust-workspace \
-            --disable-approval \
-            --sandbox-network restricted \
-            --no-session-log \
-            --max-model-steps 10 \
-            --prompt-file automation/learning/prompts/plan-research.md
-          python - <<'PY'
-          import subprocess
-          tracked = subprocess.check_output(["git", "diff", "--name-only", "-z", "HEAD"]).split(b"\0")
-          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).split(b"\0")
-          paths = sorted({p.decode("utf-8", errors="surrogateescape") for p in tracked + untracked if p})
-          if paths:
-              raise SystemExit("planning stage changed non-temporary repository paths: " + ", ".join(paths))
-          PY
-          python automation/learning/secret_guard.py \
-            --secret-env META_API_KEY \
-            research/research-plan.json
-
+          muse exec --trust-workspace --disable-approval --sandbox-network restricted --no-session-log --max-model-steps 10 --prompt-file automation/learning/prompts/plan-research.md
+          git diff --quiet HEAD -- . || { echo 'Planning changed tracked repository files.' >&2; exit 1; }
+          test -z "$(git ls-files --others --exclude-standard)" || { echo 'Planning created unauthorized files.' >&2; exit 1; }
+          python automation/learning/secret_guard.py --secret-env META_API_KEY research/research-plan.json
       - name: Validate research plan
-        run: |
-          set -euo pipefail
-          python automation/learning/validate_research_plan.py \
-            research/research-plan.json \
-            --expected-domain "${{ steps.resolve.outputs.domain }}"
-
-      - name: Upload research plan
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        run: python automation/learning/validate_research_plan.py research/research-plan.json --expected-domain '${{ steps.resolve.outputs.domain }}'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: research-plan
           path: |
@@ -182,172 +120,89 @@ jobs:
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
+    permissions: {contents: read}
     steps:
-      - name: Checkout exact run commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: '3.12'
-
-      - name: Download research plan
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: research-plan
-          path: research
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with: {python-version: '3.12'}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with: {name: research-plan, path: research}
       - name: Collect bounded GitHub research
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        env: {GITHUB_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
-          python automation/learning/collect_github_research.py \
-            research/research-plan.json \
-            --output-dir research/bundle \
-            --candidate-limit "${{ needs.plan.outputs.candidate_limit }}"
+          python automation/learning/collect_github_research.py research/research-plan.json --output-dir research/bundle --candidate-limit '${{ needs.plan.outputs.candidate_limit }}'
           python - <<'PY'
           import json
           from pathlib import Path
-          manifest = json.loads(Path("research/bundle/manifest.json").read_text(encoding="utf-8"))
-          safety = manifest.get("safety", {})
-          if safety.get("external_content_is_untrusted") is not True:
-              raise SystemExit("bundle manifest did not preserve untrusted-content boundary")
-          if safety.get("repository_code_executed") is not False:
-              raise SystemExit("bundle manifest indicates repository code execution")
-          if len(manifest.get("focused_sources", [])) < 2:
-              raise SystemExit("bundle contains fewer than two focused sources")
+          m = json.loads(Path('research/bundle/manifest.json').read_text())
+          s = m.get('safety', {})
+          if s.get('external_content_is_untrusted') is not True: raise SystemExit('untrusted-content boundary missing')
+          if s.get('repository_code_executed') is not False: raise SystemExit('repository code execution indicated')
+          if len(m.get('focused_sources', [])) < 2: raise SystemExit('fewer than two focused sources')
           PY
-
-      - name: Upload bounded research bundle
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: research-bundle
-          path: research/bundle
-          if-no-files-found: error
-          retention-days: 3
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with: {name: research-bundle, path: research/bundle, if-no-files-found: error, retention-days: 3}
 
   synthesize:
     needs: [plan, collect]
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
+    permissions: {contents: read}
     outputs:
       level: ${{ steps.validate.outputs.level }}
       has_changes: ${{ steps.validate.outputs.has_changes }}
     steps:
-      - name: Checkout exact run commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: '3.12'
-
-      - name: Download research plan
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: research-plan
-          path: research
-
-      - name: Download research bundle
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: research-bundle
-          path: research/bundle
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with: {python-version: '3.12'}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with: {name: research-plan, path: research}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with: {name: research-bundle, path: research/bundle}
       - name: Require Muse API key
-        env:
-          META_API_KEY: ${{ secrets.META_API_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "$META_API_KEY" ]; then
-            echo 'META_API_KEY is required for Muse learning runs.' >&2
-            exit 2
-          fi
-
+        env: {META_API_KEY: '${{ secrets.META_API_KEY }}'}
+        run: test -n "$META_API_KEY" || { echo 'META_API_KEY is required.' >&2; exit 2; }
       - name: Install Muse Code
         run: |
           set -euo pipefail
           curl -fsSL https://dev.meta.ai/install.sh | sh
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
           muse --version
-
       - name: Synthesize learning with Muse
-        env:
-          META_API_KEY: ${{ secrets.META_API_KEY }}
+        env: {META_API_KEY: '${{ secrets.META_API_KEY }}'}
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
-          muse exec \
-            --trust-workspace \
-            --disable-approval \
-            --sandbox-network restricted \
-            --no-session-log \
-            --max-model-steps 18 \
-            --prompt-file automation/learning/prompts/synthesize-learning.md
-          python - <<'PY'
-          import subprocess
-          tracked = subprocess.check_output(["git", "diff", "--name-only", "-z", "HEAD"]).split(b"\0")
-          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).split(b"\0")
-          paths = sorted({p.decode("utf-8", errors="surrogateescape") for p in tracked + untracked if p})
-          unexpected = [p for p in paths if not (p.startswith("knowledge/") or p.startswith("evolution/"))]
-          if unexpected:
-              raise SystemExit("synthesis changed unauthorized repository paths: " + ", ".join(unexpected))
-          PY
-          python automation/learning/secret_guard.py \
-            --secret-env META_API_KEY \
-            knowledge evolution research/evolution-decision.json
-
+          muse exec --trust-workspace --disable-approval --sandbox-network restricted --no-session-log --max-model-steps 18 --prompt-file automation/learning/prompts/synthesize-learning.md
+          UNEXPECTED="$({ git diff --name-only HEAD -- . ':(exclude)knowledge/**' ':(exclude)evolution/**'; git ls-files --others --exclude-standard -- . ':(exclude)knowledge/**' ':(exclude)evolution/**'; } | sed '/^$/d')"
+          test -z "$UNEXPECTED" || { echo "Synthesis changed unauthorized repository paths: $UNEXPECTED" >&2; exit 1; }
+          python automation/learning/secret_guard.py --secret-env META_API_KEY knowledge evolution research/evolution-decision.json
       - name: Validate decision and durable diff
         id: validate
         run: |
           set -euo pipefail
           python automation/learning/validate_evolution_decision.py research/evolution-decision.json
+          { git diff --name-only HEAD -- knowledge evolution; git ls-files --others --exclude-standard -- knowledge evolution; } | sort -u > research/changed-files.txt
+          python automation/learning/validate_learning_output.py --changed-files research/changed-files.txt
           python - <<'PY'
-          import subprocess
+          import json
           from pathlib import Path
-          from automation.learning.validate_learning_output import validate_changed_paths
-
-          tracked = subprocess.check_output(
-              ["git", "diff", "--name-only", "-z", "HEAD"], text=False
-          ).split(b"\0")
-          untracked = subprocess.check_output(
-              ["git", "ls-files", "--others", "--exclude-standard", "-z"], text=False
-          ).split(b"\0")
-          paths = sorted({p.decode("utf-8", errors="surrogateescape") for p in tracked + untracked if p})
-          errors = validate_changed_paths(paths)
-          if errors:
-              raise SystemExit("unauthorized learning output:\n" + "\n".join(errors))
-          Path("research/changed-files.json").write_text(
-              __import__("json").dumps(paths, indent=2) + "\n", encoding="utf-8"
-          )
+          paths = [x for x in Path('research/changed-files.txt').read_text().splitlines() if x]
+          Path('research/changed-files.json').write_text(json.dumps(paths, indent=2) + '\n')
           PY
           git add -N -- knowledge evolution
           git diff --binary HEAD -- knowledge evolution > research/learning.patch
-          if [ -s research/learning.patch ]; then
-            echo 'has_changes=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'has_changes=false' >> "$GITHUB_OUTPUT"
-          fi
+          test ! -s research/learning.patch || echo 'has_changes=true' >> "$GITHUB_OUTPUT"
+          test -s research/learning.patch || echo 'has_changes=false' >> "$GITHUB_OUTPUT"
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           from pathlib import Path
-          decision = json.loads(Path("research/evolution-decision.json").read_text(encoding="utf-8"))
-          print(f"level={decision['level']}")
+          print('level=' + json.loads(Path('research/evolution-decision.json').read_text())['level'])
           PY
-
-      - name: Upload validated learning output
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: validated-learning
           path: |
@@ -360,33 +215,17 @@ jobs:
 
   publish_learning:
     needs: [plan, synthesize]
-    if: >-
-      ${{ needs.synthesize.outputs.has_changes == 'true' &&
-          needs.plan.outputs.dry_run == 'false' &&
-          github.ref_name == github.event.repository.default_branch }}
+    if: ${{ needs.synthesize.outputs.has_changes == 'true' && needs.plan.outputs.dry_run == 'false' && github.ref_name == github.event.repository.default_branch }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: write
-      pull-requests: write
+    permissions: {contents: write, pull-requests: write}
     steps:
-      - name: Checkout exact run commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: '3.12'
-
-      - name: Download validated learning output
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: validated-learning
-          path: research/publish
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with: {python-version: '3.12'}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with: {name: validated-learning, path: research/publish}
       - name: Apply, revalidate, and publish learning PR
         env:
           GH_TOKEN: ${{ github.token }}
@@ -397,147 +236,66 @@ jobs:
         run: |
           set -euo pipefail
           git apply research/publish/learning.patch
-          python - <<'PY'
-          import subprocess
-          from automation.learning.validate_learning_output import validate_changed_paths
-          tracked = subprocess.check_output(["git", "diff", "--name-only", "-z", "HEAD"]).split(b"\0")
-          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).split(b"\0")
-          paths = sorted({p.decode("utf-8", errors="surrogateescape") for p in tracked + untracked if p})
-          errors = validate_changed_paths(paths)
-          if errors:
-              raise SystemExit("publisher path guard failed:\n" + "\n".join(errors))
-          PY
-          TOPIC="$(python - <<'PY'
-          import json
-          from pathlib import Path
-          print(json.loads(Path("research/publish/research-plan.json").read_text(encoding="utf-8"))["topic"])
-          PY
-          )"
-          DATE="$(python - <<'PY'
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-          print(datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat())
-          PY
-          )"
-          BRANCH="$(python - <<PY
-          from automation.learning.branch_names import learning_branch
-          print(learning_branch("$DOMAIN", "$DATE", "$TOPIC"))
-          PY
-          )"
+          { git diff --name-only HEAD -- knowledge evolution; git ls-files --others --exclude-standard -- knowledge evolution; } | sort -u > research/publish/changed.txt
+          python automation/learning/validate_learning_output.py --changed-files research/publish/changed.txt
+          TOPIC="$(python -c "import json; print(json.load(open('research/publish/research-plan.json'))['topic'])")"
+          DATE="$(TZ=Asia/Shanghai date +%F)"
+          BRANCH="$(python -c 'import sys; from automation.learning.branch_names import learning_branch; print(learning_branch(*sys.argv[1:]))' "$DOMAIN" "$DATE" "$TOPIC")"
           git checkout -b "$BRANCH"
           git add -- knowledge evolution
           python automation/learning/validate_learning_output.py < <(git diff --cached --name-only)
-          git config user.name 'muse-learning-bot'
-          git config user.email 'muse-learning-bot@users.noreply.github.com'
+          git config user.name muse-learning-bot
+          git config user.email muse-learning-bot@users.noreply.github.com
           git commit -m "Learn: $DOMAIN / $TOPIC"
           gh auth setup-git
           git push origin "HEAD:$BRANCH"
-          gh pr create \
-            --repo "$REPOSITORY" \
-            --base "$DEFAULT_BRANCH" \
-            --head "$BRANCH" \
-            --title "Muse learning: $DOMAIN / $TOPIC" \
-            --body "Autonomous learning output for **$DOMAIN / $TOPIC**. This PR contains only validated knowledge/evolution paths and is never auto-merged. Workflow evidence: $RUN_URL"
+          gh pr create --repo "$REPOSITORY" --base "$DEFAULT_BRANCH" --head "$BRANCH" --title "Muse learning: $DOMAIN / $TOPIC" --body "Autonomous learning output for **$DOMAIN / $TOPIC**. Validated knowledge/evolution paths only; never auto-merged. Workflow: $RUN_URL"
 
   draft_skill_candidate:
     needs: [plan, synthesize]
     if: ${{ needs.synthesize.outputs.level == 'L2' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions:
-      contents: read
+    permissions: {contents: read}
     steps:
-      - name: Checkout exact run commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: '3.12'
-
-      - name: Download validated learning output
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: validated-learning
-          path: research
-
-      - name: Materialize validated proposal locally
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with: {python-version: '3.12'}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with: {name: validated-learning, path: research}
+      - name: Materialize validated proposal
         run: |
           set -euo pipefail
-          if [ -s research/learning.patch ]; then
-            git apply research/learning.patch
-          fi
+          test ! -s research/learning.patch || git apply research/learning.patch
           git add -N -- knowledge evolution
           git diff --binary HEAD -- knowledge evolution > research/pre-skill-learning.patch
-
       - name: Require Muse API key
-        env:
-          META_API_KEY: ${{ secrets.META_API_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "$META_API_KEY" ]; then
-            echo 'META_API_KEY is required for Muse learning runs.' >&2
-            exit 2
-          fi
-
+        env: {META_API_KEY: '${{ secrets.META_API_KEY }}'}
+        run: test -n "$META_API_KEY" || { echo 'META_API_KEY is required.' >&2; exit 2; }
       - name: Install Muse Code
         run: |
           set -euo pipefail
           curl -fsSL https://dev.meta.ai/install.sh | sh
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
           muse --version
-
       - name: Draft review-only Skill candidate
-        env:
-          META_API_KEY: ${{ secrets.META_API_KEY }}
+        env: {META_API_KEY: '${{ secrets.META_API_KEY }}'}
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
-          muse exec \
-            --trust-workspace \
-            --disable-approval \
-            --sandbox-network restricted \
-            --no-session-log \
-            --max-model-steps 10 \
-            --prompt-file automation/learning/prompts/draft-skill-candidate.md
+          muse exec --trust-workspace --disable-approval --sandbox-network restricted --no-session-log --max-model-steps 10 --prompt-file automation/learning/prompts/draft-skill-candidate.md
           git diff --binary HEAD -- knowledge evolution > research/post-skill-learning.patch
-          if ! cmp -s research/pre-skill-learning.patch research/post-skill-learning.patch; then
-            echo 'Skill drafting stage changed validated knowledge/evolution content.' >&2
-            exit 1
-          fi
-          python - <<'PY'
-          import subprocess
-          tracked = subprocess.check_output(["git", "diff", "--name-only", "-z", "HEAD"]).split(b"\0")
-          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).split(b"\0")
-          paths = sorted({p.decode("utf-8", errors="surrogateescape") for p in tracked + untracked if p})
-          unexpected = [p for p in paths if not (p.startswith("knowledge/") or p.startswith("evolution/"))]
-          if unexpected:
-              raise SystemExit("Skill drafting changed unauthorized repository paths: " + ", ".join(unexpected))
-          PY
-          python automation/learning/secret_guard.py \
-            --secret-env META_API_KEY \
-            research/skill-candidate.json research/skill-candidate
-
+          cmp -s research/pre-skill-learning.patch research/post-skill-learning.patch || { echo 'Skill drafting changed validated learning content.' >&2; exit 1; }
+          UNEXPECTED="$({ git diff --name-only HEAD -- . ':(exclude)knowledge/**' ':(exclude)evolution/**'; git ls-files --others --exclude-standard -- . ':(exclude)knowledge/**' ':(exclude)evolution/**'; } | sed '/^$/d')"
+          test -z "$UNEXPECTED" || { echo "Skill drafting changed unauthorized repository paths: $UNEXPECTED" >&2; exit 1; }
+          python automation/learning/secret_guard.py --secret-env META_API_KEY research/skill-candidate.json research/skill-candidate
       - name: Validate Skill candidate
         run: |
           set -euo pipefail
-          TARGET="$(python - <<'PY'
-          import json
-          from pathlib import Path
-          data = json.loads(Path("research/skill-candidate.json").read_text(encoding="utf-8"))
-          print(data["target_path"])
-          PY
-          )"
-          python automation/learning/validate_skill_candidate.py \
-            research/skill-candidate.json \
-            research/skill-candidate/SKILL.md \
-            "$TARGET"
-
-      - name: Upload validated Skill candidate
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+          TARGET="$(python -c "import json; print(json.load(open('research/skill-candidate.json'))['target_path'])")"
+          python automation/learning/validate_skill_candidate.py research/skill-candidate.json research/skill-candidate/SKILL.md "$TARGET"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: skill-candidate
           path: |
@@ -548,33 +306,17 @@ jobs:
 
   publish_skill_candidate:
     needs: [plan, synthesize, draft_skill_candidate]
-    if: >-
-      ${{ needs.synthesize.outputs.level == 'L2' &&
-          needs.plan.outputs.dry_run == 'false' &&
-          github.ref_name == github.event.repository.default_branch }}
+    if: ${{ needs.synthesize.outputs.level == 'L2' && needs.plan.outputs.dry_run == 'false' && github.ref_name == github.event.repository.default_branch }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: write
-      pull-requests: write
+    permissions: {contents: write, pull-requests: write}
     steps:
-      - name: Checkout exact run commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: '3.12'
-
-      - name: Download Skill candidate
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: skill-candidate
-          path: research/candidate-publish
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with: {python-version: '3.12'}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with: {name: skill-candidate, path: research/candidate-publish}
       - name: Revalidate and publish Skill candidate PR
         env:
           GH_TOKEN: ${{ github.token }}
@@ -583,58 +325,23 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          META="research/candidate-publish/skill-candidate.json"
-          CANDIDATE="research/candidate-publish/skill-candidate/SKILL.md"
-          TARGET="$(python - <<'PY'
-          import json
-          from pathlib import Path
-          data = json.loads(Path("research/candidate-publish/skill-candidate.json").read_text(encoding="utf-8"))
-          print(data["target_path"])
-          PY
-          )"
-          SKILL="$(python - <<'PY'
-          import json
-          from pathlib import Path
-          data = json.loads(Path("research/candidate-publish/skill-candidate.json").read_text(encoding="utf-8"))
-          print(data["target_skill"])
-          PY
-          )"
-          PROPOSAL="$(python - <<'PY'
-          import json
-          from pathlib import Path
-          data = json.loads(Path("research/candidate-publish/skill-candidate.json").read_text(encoding="utf-8"))
-          print(data["proposal_path"])
-          PY
-          )"
+          META=research/candidate-publish/skill-candidate.json
+          CANDIDATE=research/candidate-publish/skill-candidate/SKILL.md
+          TARGET="$(python -c "import json; print(json.load(open('$META'))['target_path'])")"
+          SKILL="$(python -c "import json; print(json.load(open('$META'))['target_skill'])")"
+          PROPOSAL="$(python -c "import json; print(json.load(open('$META'))['proposal_path'])")"
           python automation/learning/validate_skill_candidate.py "$META" "$CANDIDATE" "$TARGET"
           cp "$CANDIDATE" "$TARGET"
-          DATE="$(python - <<'PY'
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-          print(datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat())
-          PY
-          )"
+          DATE="$(TZ=Asia/Shanghai date +%F)"
           TOPIC="$(basename "$PROPOSAL" .md)"
-          BRANCH="$(python - <<PY
-          from automation.learning.branch_names import skill_branch
-          print(skill_branch("$SKILL", "$DATE", "$TOPIC"))
-          PY
-          )"
+          BRANCH="$(python -c 'import sys; from automation.learning.branch_names import skill_branch; print(skill_branch(*sys.argv[1:]))' "$SKILL" "$DATE" "$TOPIC")"
           git checkout -b "$BRANCH"
           git add -- "$TARGET"
           CHANGED="$(git diff --cached --name-only)"
-          if [ "$CHANGED" != "$TARGET" ]; then
-            echo 'Skill publisher detected an unexpected changed path.' >&2
-            exit 1
-          fi
-          git config user.name 'muse-learning-bot'
-          git config user.email 'muse-learning-bot@users.noreply.github.com'
+          test "$CHANGED" = "$TARGET" || { echo 'Skill publisher detected unexpected changed paths.' >&2; exit 1; }
+          git config user.name muse-learning-bot
+          git config user.email muse-learning-bot@users.noreply.github.com
           git commit -m "Propose Skill evolution: $SKILL"
           gh auth setup-git
           git push origin "HEAD:$BRANCH"
-          gh pr create \
-            --repo "$REPOSITORY" \
-            --base "$DEFAULT_BRANCH" \
-            --head "$BRANCH" \
-            --title "Muse Skill candidate: $SKILL" \
-            --body "Review-only Skill candidate. Evidence/proposal: \`$PROPOSAL\`. This PR is never auto-merged. Workflow evidence: $RUN_URL"
+          gh pr create --repo "$REPOSITORY" --base "$DEFAULT_BRANCH" --head "$BRANCH" --title "Muse Skill candidate: $SKILL" --body "Review-only Skill candidate. Proposal: \`$PROPOSAL\`. Never auto-merged. Workflow: $RUN_URL"
