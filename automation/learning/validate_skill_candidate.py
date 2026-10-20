@@ -44,7 +44,7 @@ def _valid_proposal_path(value) -> bool:
     parts = PurePosixPath(normalized).parts
     if ".." in parts or "." in parts:
         return False
-    return normalized.startswith("evolution/proposals/") and normalized.endswith(".md")
+    return bool(re.fullmatch(r"evolution/proposals/[a-z0-9][a-z0-9._-]*\.md", normalized))
 
 
 def validate_skill_candidate(metadata: dict, candidate_text: str, current_text: str) -> list[str]:
