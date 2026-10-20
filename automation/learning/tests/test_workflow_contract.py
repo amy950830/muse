@@ -50,6 +50,12 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn('--disable-sandbox', text)
         self.assertNotIn('--sandbox-network unrestricted', text)
 
+    def test_muse_installer_uses_bash_not_sh(self):
+        text = workflow_text()
+        installer = 'https://dev.meta.ai/install.sh'
+        self.assertNotIn(f'{installer} | sh', text)
+        self.assertEqual(text.count(f'{installer} | bash'), 3)
+
     def test_muse_jobs_are_read_only_and_publish_jobs_never_run_muse(self):
         text = workflow_text()
         for job in ('plan', 'synthesize', 'draft_skill_candidate'):

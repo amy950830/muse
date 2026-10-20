@@ -93,7 +93,7 @@ jobs:
       - name: Install Muse Code
         run: |
           set -euo pipefail
-          curl -fsSL https://dev.meta.ai/install.sh | sh
+          curl -fsSL https://dev.meta.ai/install.sh | bash
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
           muse --version
       - name: Select research topic with Muse
@@ -168,7 +168,7 @@ jobs:
       - name: Install Muse Code
         run: |
           set -euo pipefail
-          curl -fsSL https://dev.meta.ai/install.sh | sh
+          curl -fsSL https://dev.meta.ai/install.sh | bash
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
           muse --version
       - name: Synthesize learning with Muse
@@ -276,7 +276,7 @@ jobs:
       - name: Install Muse Code
         run: |
           set -euo pipefail
-          curl -fsSL https://dev.meta.ai/install.sh | sh
+          curl -fsSL https://dev.meta.ai/install.sh | bash
           export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
           muse --version
       - name: Draft review-only Skill candidate
