@@ -47,6 +47,19 @@ def _valid_proposal_path(value) -> bool:
     return bool(re.fullmatch(r"evolution/proposals/[a-z0-9][a-z0-9._-]*\.md", normalized))
 
 
+def resolve_skill_target(metadata: dict) -> str:
+    """Return the only permitted existing Skill path before any file read occurs."""
+    if not isinstance(metadata, dict):
+        raise ValueError("candidate metadata must be a JSON object")
+    target_skill = metadata.get("target_skill")
+    if target_skill not in SUPPORTED_SKILLS:
+        raise ValueError("target_skill must name one existing supported Skill")
+    expected_path = f".agents/skills/{target_skill}/SKILL.md"
+    if metadata.get("target_path") != expected_path:
+        raise ValueError("target_path must be exactly one existing .agents/skills/<skill>/SKILL.md path")
+    return expected_path
+
+
 def validate_skill_candidate(metadata: dict, candidate_text: str, current_text: str) -> list[str]:
     errors: list[str] = []
     if not isinstance(metadata, dict):
@@ -102,10 +115,18 @@ def main() -> int:
     parser.add_argument("current", type=Path)
     args = parser.parse_args()
     metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
+    try:
+        expected_current = resolve_skill_target(metadata)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    if str(args.current).replace("\\", "/") != expected_current:
+        print("ERROR: current path must match the validated Skill target")
+        return 1
     errors = validate_skill_candidate(
         metadata,
         args.candidate.read_text(encoding="utf-8"),
-        args.current.read_text(encoding="utf-8"),
+        Path(expected_current).read_text(encoding="utf-8"),
     )
     if errors:
         for error in errors:
